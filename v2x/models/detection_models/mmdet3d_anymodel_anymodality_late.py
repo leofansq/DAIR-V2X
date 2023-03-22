@@ -2,6 +2,7 @@ import os.path as osp
 import numpy as np
 import torch.nn as nn
 import logging
+import pdb
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +16,7 @@ from model_utils import (
     SpaceCompensator,
     TimeCompensator,
     BasicFuser,
+    CONSULT
 )
 from dataset.dataset_utils import (
     load_json,
@@ -33,7 +35,7 @@ from v2x_utils import (
 )
 
 
-def gen_pred_dict(id, timestamp, box, arrow, points, score, label):
+def gen_pred_dict(id, timestamp, box, arrow, points, score, label, dist=None):
     if len(label) == 0:
         score = [-2333]
         label = [-1]
@@ -45,6 +47,7 @@ def gen_pred_dict(id, timestamp, box, arrow, points, score, label):
         "scores_3d": score,
         "labels_3d": label,
         "points": points.tolist(),
+        "dists_3d": dist
     }
     return save_dict
 
@@ -97,6 +100,9 @@ class LateFusionInf(nn.Module):
             result, _ = inference_mono_3d_detector(self.model, tmp, annos)
         box, box_ry, box_center, arrow_ends = get_box_info(result)
 
+        ######
+        dist = np.sqrt(np.sum(box_center[:,:2]**2,axis=1))
+
         # Convert to other coordinate
         if trans is not None:
             box = trans(box)
@@ -122,12 +128,14 @@ class LateFusionInf(nn.Module):
             arrow_ends = arrow_ends[remain]
             result[0]["scores_3d"] = result[0]["scores_3d"].numpy()[remain]
             result[0]["labels_3d"] = result[0]["labels_3d"].numpy()[remain]
+            dist = dist[remain]
         else:
             box = np.zeros((1, 8, 3))
             box_center = np.zeros((1, 1, 3))
             arrow_ends = np.zeros((1, 1, 3))
             result[0]["labels_3d"] = np.zeros((1))
             result[0]["scores_3d"] = np.zeros((1))
+            dist = np.zeros((1))
 
         if self.args.sensortype == "lidar" and self.args.save_point_cloud:
             save_data = trans(frame.point_cloud(format="array"))
@@ -144,6 +152,7 @@ class LateFusionInf(nn.Module):
             save_data,
             result[0]["scores_3d"].tolist(),
             result[0]["labels_3d"].tolist(),
+            dist
         )
         save_pkl(pred_dict, path)
 
@@ -163,6 +172,8 @@ class LateFusionInf(nn.Module):
         self.pipe.send("boxes", pred_dict["boxes_3d"])
         self.pipe.send("score", pred_dict["scores_3d"])
         self.pipe.send("label", pred_dict["labels_3d"])
+        self.pipe.send("dist", pred_dict["dists_3d"])
+
 
         if prev_inf_frame_func is not None:
             prev_frame, delta_t = prev_inf_frame_func(id, sensortype=self.args.sensortype)
@@ -192,6 +203,8 @@ class LateFusionInf(nn.Module):
                 self.pipe.send("prev_boxes", pred_dict["boxes_3d"])
                 self.pipe.send("prev_time_diff", delta_t)
                 self.pipe.send("prev_label", pred_dict["labels_3d"])
+                self.pipe.send("prev_dist", pred_dict["dists_3d"])
+
 
         return id
 
@@ -231,6 +244,9 @@ class LateFusionVeh(nn.Module):
             result, _ = inference_mono_3d_detector(self.model, tmp, annos)
         box, box_ry, box_center, arrow_ends = get_box_info(result)
 
+        ######
+        dist = np.sqrt(np.sum(box_center[:, :2]**2,axis=1))
+
         # Convert to other coordinate
         if trans is not None:
             box = trans(box)
@@ -256,12 +272,14 @@ class LateFusionVeh(nn.Module):
             arrow_ends = arrow_ends[remain]
             result[0]["scores_3d"] = result[0]["scores_3d"].numpy()[remain]
             result[0]["labels_3d"] = result[0]["labels_3d"].numpy()[remain]
+            dist = dist[remain]
         else:
             box = np.zeros((1, 8, 3))
             box_center = np.zeros((1, 1, 3))
             arrow_ends = np.zeros((1, 1, 3))
             result[0]["labels_3d"] = np.zeros((1))
             result[0]["scores_3d"] = np.zeros((1))
+            dist = np.zeros((1))
 
         if self.args.sensortype == "lidar" and self.args.save_point_cloud:
             save_data = trans(frame.point_cloud(format="array"))
@@ -278,6 +296,7 @@ class LateFusionVeh(nn.Module):
             save_data,
             result[0]["scores_3d"].tolist(),
             result[0]["labels_3d"].tolist(),
+            dist
         )
         save_pkl(pred_dict, path)
 
@@ -323,6 +342,9 @@ class LateFusion(BaseModel):
         mkdir(osp.join(args.output, "veh", "camera"))
         mkdir(osp.join(args.output, "result"))
 
+        ####
+        self.temporal_memory = None
+
     def forward(self, vic_frame, filt, prev_inf_frame_func=None, *args):
         id_inf = self.inf_model(
             vic_frame.infrastructure_frame(),
@@ -338,12 +360,14 @@ class LateFusion(BaseModel):
             None,
             np.array(self.pipe.receive("label")),
             np.array(self.pipe.receive("score")),
+            np.array(self.pipe.receive("dist")),
         )
         pred_veh = BBoxList(
             np.array(pred_dict["boxes_3d"]),
             None,
             np.array(pred_dict["labels_3d"]),
             np.array(pred_dict["scores_3d"]),
+            np.array(pred_dict["dists_3d"]),
         )
         if vic_frame.time_diff > 0 and not self.args.no_comp:
             if self.pipe.receive("prev_boxes") is not None:
@@ -352,6 +376,7 @@ class LateFusion(BaseModel):
                     None,
                     np.array(self.pipe.receive("prev_label")),
                     None,
+                    np.array(self.pipe.receive("prev_dist")),
                 )
                 offset = self.time_compensator.compensate(
                     pred_inf_prev,
@@ -368,8 +393,10 @@ class LateFusion(BaseModel):
         ind_inf, ind_veh, cost = matcher.match(pred_inf, pred_veh)
         logger.debug("matched boxes: {}, {}".format(ind_inf, ind_veh))
 
-        fuser = BasicFuser(perspective="vehicle", trust_type="main", retain_type="all")
+        # fuser = BasicFuser(perspective="vehicle", trust_type="main", retain_type="all")
+        fuser = CONSULT(perspective="vehicle", modal_type=self.args.sensortype)
         result = fuser.fuse(pred_inf, pred_veh, ind_inf, ind_veh)
+
         result["inf_id"] = id_inf
         result["veh_id"] = id_veh
         result["inf_boxes"] = pred_inf.boxes

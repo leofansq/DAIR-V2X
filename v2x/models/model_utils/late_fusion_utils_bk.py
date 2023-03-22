@@ -298,82 +298,23 @@ class BasicFuser(object):
             confidence1 = np.ones_like(confidence1)
             confidence2 = 1 - confidence1
 
-        center = frame1.center[ind1] * np.repeat(confidence1[:, np.newaxis], 3, axis=1) + frame2.center[
-            ind2
-        ] * np.repeat(confidence2[:, np.newaxis], 3, axis=1)
-        boxes = (
-            frame1.boxes[ind1]
-            + np.repeat(center[:, np.newaxis, :], 8, axis=1)
-            - np.repeat(frame1.center[ind1][:, np.newaxis, :], 8, axis=1)
-        )
-        label = frame1.label[ind1]
-        confidence = frame1.confidence[ind1] * confidence1 + frame2.confidence[ind2] * confidence2
+        # center = frame1.center[ind1] * np.repeat(confidence1[:, np.newaxis], 3, axis=1) + frame2.center[ind2] * np.repeat(confidence2[:, np.newaxis], 3, axis=1)
+        # boxes = (
+        #     frame1.boxes[ind1]
+        #     + np.repeat(center[:, np.newaxis, :], 8, axis=1)
+        #     - np.repeat(frame1.center[ind1][:, np.newaxis, :], 8, axis=1)
+        # )
+        # label = frame1.label[ind1]
+        # confidence = frame1.confidence[ind1] * confidence1 + frame2.confidence[ind2] * confidence2
         # arrows = frame1.arrows[ind1]
 
-        boxes_u = []
-        label_u = []
-        confidence_u = []
-        # arrows_u = []
-        if self.retain_type in ["all", "main"]:
-            for i in range(frame1.num_boxes):
-                if i not in ind1 and frame1.label[i] != -1:
-                    boxes_u.append(frame1.boxes[i])
-                    label_u.append(frame1.label[i])
-                    confidence_u.append(frame1.confidence[i])
-                    # arrows_u.append(frame1.arrows[i])
-
-        if self.retain_type in ["all"]:
-            for i in range(frame2.num_boxes):
-                if i not in ind2 and frame2.label[i] != -1:
-                    boxes_u.append(frame2.boxes[i])
-                    label_u.append(frame2.label[i])
-                    confidence_u.append(frame2.confidence[i] * 0.4)
-                    # arrows_u.append(frame2.arrows[i])
-        if len(boxes_u) == 0:
-            result_dict = {
-                "boxes_3d": boxes,
-                # "arrows": arrows,
-                "labels_3d": label,
-                "scores_3d": confidence,
-            }
-        else:
-            result_dict = {
-                "boxes_3d": np.concatenate((boxes, np.array(boxes_u)), axis=0),
-                # "arrows": np.concatenate((arrows, np.array(arrows_u)), axis=0),
-                "labels_3d": np.concatenate((label, np.array(label_u)), axis=0),
-                "scores_3d": np.concatenate((confidence, np.array(confidence_u)), axis=0),
-            }
-        return result_dict
-
-class CONSULT(object):
-    def __init__(self, perspective, modal_type):
-        """
-        CONfidence-based reSULT-aggregation
-        
-        perspective: "infrastructure" or "vehicle"
-        modal_type: "lidar" or "camera"
-        """
-        self.perspective = perspective
-        self.modal_type = modal_type
-
-    def fuse(self, frame_r, frame_v, ind_r, ind_v):
-        if self.perspective == "infrastructure":
-            frame1 = frame_r
-            frame2 = frame_v
-            ind1 = ind_r
-            ind2 = ind_v
-        elif self.perspective == "vehicle":
-            frame1 = frame_v
-            frame2 = frame_r
-            ind1 = ind_v
-            ind2 = ind_r
-
         # Score-fusion: bayesian-fusion
-        if self.modal_type == 'lidar':
-            model_confidence = min(17.58 / 48.06, 1.0)
-        elif self.modal_type == 'camera':
-            model_confidence = min(14.02/9.03, 1.0)
-        frame2.confidence[ind2] = frame2.confidence[ind2] * model_confidence
+        # for Liadr
+        # model_confidence = 17.58 / 48.06
+        # frame2.confidence[ind2] = frame2.confidence[ind2] * model_confidence
+        # # for Camera
+        model_confidence = 1
+        frame1.confidence[ind1] = frame1.confidence[ind1] * model_confidence
 
         confidence_mean = (frame1.confidence[ind1]+frame2.confidence[ind2])/2
         confidence = self.bayesian_fusion(np.array([frame1.confidence[ind1], confidence_mean]))
@@ -411,21 +352,23 @@ class CONSULT(object):
         label_u = []
         confidence_u = []
         # arrows_u = []
+        if self.retain_type in ["all", "main"]:
+            for i in range(frame1.num_boxes):
+                if i not in ind1 and frame1.label[i] != -1:
+                    boxes_u.append(frame1.boxes[i])
+                    label_u.append(frame1.label[i])
+                    confidence_u.append(frame1.confidence[i] * model_confidence) # for camera
+                    # confidence_u.append(frame1.confidence[i]) # for lidar
+                    # arrows_u.append(frame1.arrows[i])
 
-        for i in range(frame1.num_boxes):
-            if i not in ind1 and frame1.label[i] != -1:
-                boxes_u.append(frame1.boxes[i])
-                label_u.append(frame1.label[i])
-                confidence_u.append(frame1.confidence[i])
-                # arrows_u.append(frame1.arrows[i])
-
-        for i in range(frame2.num_boxes):
-            if i not in ind2 and frame2.label[i] != -1:
-                boxes_u.append(frame2.boxes[i])
-                label_u.append(frame2.label[i])
-                confidence_u.append(frame2.confidence[i] * model_confidence)
-                # arrows_u.append(frame2.arrows[i])
-
+        if self.retain_type in ["all"]:
+            for i in range(frame2.num_boxes):
+                if i not in ind2 and frame2.label[i] != -1:
+                    boxes_u.append(frame2.boxes[i])
+                    label_u.append(frame2.label[i])
+                    confidence_u.append(frame2.confidence[i]) # for camera
+                    # confidence_u.append(frame2.confidence[i] * model_confidence) # for lidar
+                    # arrows_u.append(frame2.arrows[i])
         if len(boxes_u) == 0:
             result_dict = {
                 "boxes_3d": boxes,

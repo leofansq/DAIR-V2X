@@ -1,4 +1,4 @@
-DATA="../data/DAIR-V2X/cooperative-vehicle-infrastructure"
+DATA="/data/hxl/data/DAIR-V2X/cooperative-vehicle-infrastructure"
 OUTPUT="../cache/vic-late-camera"
 rm -r $OUTPUT
 rm -r ../cache

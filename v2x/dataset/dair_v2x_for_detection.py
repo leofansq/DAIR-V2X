@@ -147,8 +147,8 @@ class VICDataset(DAIRV2XDataset):
             elif sensortype == "camera":
                 inf_frame = self.inf_path2info[elem["infrastructure_image_path"]]
                 veh_frame = self.veh_path2info[elem["vehicle_image_path"]]
-                get_annos(path, "infrastructure-side", inf_frame, "camera")
-                get_annos(path, "vehicle-side", veh_frame, "camera")
+                # get_annos(path, "infrastructure-side", inf_frame, "camera")
+                # get_annos(path, "vehicle-side", veh_frame, "camera")
 
             inf_frame = InfFrame(path + "/infrastructure-side/", inf_frame)
             veh_frame = VehFrame(path + "/vehicle-side/", veh_frame)
@@ -264,7 +264,7 @@ class VICAsyncDataset(VICDataset):
             if int(index) - self.k < int(cur["batch_start_id"]):
                 return None, None
             prev = self.inf_path2info["infrastructure-side/image/" + id_to_str(int(index) - self.k) + ".jpg"]
-            get_annos(self.path, "infrastructure-side", prev, "camera")
+            # get_annos(self.path, "infrastructure-side", prev, "camera")
             return (
                 InfFrame(self.path + "/infrastructure-side/", prev),
                 (int(cur["image_timestamp"]) - int(prev["image_timestamp"])) / 1000.0,
