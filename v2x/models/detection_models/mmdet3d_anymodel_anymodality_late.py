@@ -2,6 +2,7 @@ import os.path as osp
 import numpy as np
 import torch.nn as nn
 import logging
+from sklearn.linear_model import LinearRegression
 import pdb
 
 logger = logging.getLogger(__name__)
@@ -158,7 +159,7 @@ class LateFusionInf(nn.Module):
 
         return pred_dict, id
 
-    def forward(self, data, trans, pred_filter, prev_inf_frame_func=None):
+    def forward(self, data, trans, pred_filter, prev_inf_frame_func=None, is_count_byte=True):
         try:
             pred_dict, id = self.pred(data, trans, pred_filter)
         except Exception:
@@ -169,10 +170,10 @@ class LateFusionInf(nn.Module):
                 device=self.args.device,
             )
             pred_dict, id = self.pred(data, trans, pred_filter)
-        self.pipe.send("boxes", pred_dict["boxes_3d"])
-        self.pipe.send("score", pred_dict["scores_3d"])
-        self.pipe.send("label", pred_dict["labels_3d"])
-        self.pipe.send("dist", pred_dict["dists_3d"])
+        self.pipe.send("boxes", pred_dict["boxes_3d"], is_count_byte)
+        self.pipe.send("score", pred_dict["scores_3d"], is_count_byte)
+        self.pipe.send("label", pred_dict["labels_3d"], is_count_byte)
+        self.pipe.send("dist", pred_dict["dists_3d"], is_count_byte)
 
 
         if prev_inf_frame_func is not None:
@@ -200,10 +201,10 @@ class LateFusionInf(nn.Module):
                         prev_frame_trans,
                         pred_filter,
                     )
-                self.pipe.send("prev_boxes", pred_dict["boxes_3d"])
+                self.pipe.send("prev_boxes", pred_dict["boxes_3d"], is_count_byte)
                 self.pipe.send("prev_time_diff", delta_t)
-                self.pipe.send("prev_label", pred_dict["labels_3d"])
-                self.pipe.send("prev_dist", pred_dict["dists_3d"])
+                self.pipe.send("prev_label", pred_dict["labels_3d"], is_count_byte)
+                self.pipe.send("prev_dist", pred_dict["dists_3d"], is_count_byte)
 
 
         return id
@@ -342,15 +343,73 @@ class LateFusion(BaseModel):
         mkdir(osp.join(args.output, "veh", "camera"))
         mkdir(osp.join(args.output, "result"))
 
-        ####
-        self.temporal_memory = None
+        self.perspective = "vehicle"
 
-    def forward(self, vic_frame, filt, prev_inf_frame_func=None, *args):
+    def forward(self, vic_frame, filt, prev_inf_frame_func=None, prev_vic_frame_func=None, *args):
+
+        pred_inf, pred_veh, id_inf, id_veh = self.pred(vic_frame, filt, prev_inf_frame_func)
+
+        # matcher = EuclidianMatcher(diff_label_filt)
+        # ind_inf, ind_veh, cost = matcher.match(pred_inf, pred_veh)
+        # logger.debug("matched boxes: {}, {}".format(ind_inf, ind_veh))
+        # fuser = BasicFuser(perspective="vehicle", trust_type="main", retain_type="all")
+        # result = fuser.fuse(pred_inf, pred_veh, ind_inf, ind_veh, self.model_confidence)
+
+        # CONSULT
+        matcher = EuclidianMatcher(diff_label_filt)
+        fuser = CONSULT(self.perspective)
+
+        if self.args.sensortype == 'lidar':
+            self.model_confidence = min(17.58 / 48.06, 1.0)
+            tf_para = {"type":"max", "prev_th":0.5, "prev_decay":0.5}
+        elif self.args.sensortype == 'camera':
+            self.model_confidence = min(14.02/9.03, 1.0)
+            tf_para = {"type":"main", "prev_th":0.8, "prev_decay":0.6}
+        
+        pred_temporal = self.temporal_predict(prev_vic_frame_func, id_veh, filt)
+        if pred_temporal is not None:
+            print ("Found previous frames, CONSULT-temporal is active.")
+            if self.perspective=="vehicle":
+                ind_temporal, ind_cur, _ = matcher.match(pred_temporal, pred_veh)
+                result = fuser.fuse(pred_veh, pred_temporal, ind_cur, ind_temporal, fusion_type='temporal',\
+                                    temporal_type=tf_para["type"], temporal_th=tf_para["prev_th"], temporal_decay=tf_para["prev_decay"])
+                pred_veh = BBoxList(
+                                np.array(result["boxes_3d"]),
+                                None,
+                                np.array(result["labels_3d"]),
+                                np.array(result["scores_3d"]),
+                                np.array(result["dists_3d"]),
+                            )
+            elif self.perspective=="infrastructure":
+                ind_temporal, ind_cur, _ = matcher.match(pred_temporal, pred_inf)
+                result = fuser.fuse(pred_inf, pred_temporal, ind_inf, ind_temporal, fusion_type='temporal',\
+                                    temporal_type=tf_para["type"], temporal_th=tf_para["prev_th"], temporal_decay=tf_para["prev_decay"])
+                pred_inf = BBoxList(
+                                np.array(result["boxes_3d"]),
+                                None,
+                                np.array(result["labels_3d"]),
+                                np.array(result["scores_3d"]),
+                                np.array(result["dists_3d"]),
+                            )     
+
+        ind_inf, ind_veh, _ = matcher.match(pred_inf, pred_veh)
+        logger.debug("matched boxes: {}, {}".format(ind_inf, ind_veh))
+        
+        result = fuser.fuse(pred_inf, pred_veh, ind_inf, ind_veh, self.model_confidence, 'spatial')
+
+
+        result["inf_id"] = id_inf
+        result["veh_id"] = id_veh
+        result["inf_boxes"] = pred_inf.boxes
+        return result
+    
+    def pred(self, vic_frame, filt, prev_inf_frame_func, is_count_byte=True):
         id_inf = self.inf_model(
             vic_frame.infrastructure_frame(),
             vic_frame.transform(from_coord="Infrastructure_lidar", to_coord="Vehicle_lidar"),
             filt,
             prev_inf_frame_func if not self.args.no_comp else None,
+            is_count_byte
         )
         pred_dict, id_veh = self.veh_model(vic_frame.vehicle_frame(), None, filt)
 
@@ -369,7 +428,7 @@ class LateFusion(BaseModel):
             np.array(pred_dict["scores_3d"]),
             np.array(pred_dict["dists_3d"]),
         )
-        if vic_frame.time_diff > 0 and not self.args.no_comp:
+        if (vic_frame.time_diff > 0) and (prev_inf_frame_func is not None) and (not self.args.no_comp):
             if self.pipe.receive("prev_boxes") is not None:
                 pred_inf_prev = BBoxList(
                     np.array(self.pipe.receive("prev_boxes")),
@@ -388,16 +447,56 @@ class LateFusion(BaseModel):
                 logger.debug("time compensation: {}".format(offset))
             else:
                 print("no previous frame found, time compensation is skipped")
+        
+        return pred_inf, pred_veh, id_inf, id_veh
+    
+    def temporal_predict(self, prev_vic_frame_func, cur_id, filt):
 
-        matcher = EuclidianMatcher(diff_label_filt)
-        ind_inf, ind_veh, cost = matcher.match(pred_inf, pred_veh)
-        logger.debug("matched boxes: {}, {}".format(ind_inf, ind_veh))
+        p_vic = prev_vic_frame_func(cur_id, sensortype=self.args.sensortype, specified_k=1)
 
-        # fuser = BasicFuser(perspective="vehicle", trust_type="main", retain_type="all")
-        fuser = CONSULT(perspective="vehicle", modal_type=self.args.sensortype)
-        result = fuser.fuse(pred_inf, pred_veh, ind_inf, ind_veh)
+        p_frame, p_delta = p_vic["frame_vic"], p_vic["delta_t"]
 
-        result["inf_id"] = id_inf
-        result["veh_id"] = id_veh
-        result["inf_boxes"] = pred_inf.boxes
-        return result
+        temporal_pred = None
+
+        if p_frame is not None:
+            p_id = p_frame.veh_frame.id[self.args.sensortype]
+
+            pp_vic = prev_vic_frame_func(p_id, sensortype=self.args.sensortype, specified_k=1)
+            pp_frame, pp_delta = pp_vic["frame_vic"], pp_vic["delta_t"]
+
+            if pp_frame is not None:
+
+
+                matcher = EuclidianMatcher(diff_label_filt)
+                fuser = CONSULT(perspective=self.perspective)
+
+                preds = []
+                for frame_i in [pp_frame, p_frame]:
+                    
+                    pred_inf, pred_veh, _, _ = self.pred(frame_i, filt, None, False)
+                    ind_inf, ind_veh, _ = matcher.match(pred_inf, pred_veh)                
+                    pred = fuser.fuse(pred_inf, pred_veh, ind_inf, ind_veh, self.model_confidence, 'spatial')
+                    pred = BBoxList(
+                                    pred["boxes_3d"],
+                                    None,
+                                    pred["labels_3d"],
+                                    pred["scores_3d"],
+                                    np.ones_like(pred["labels_3d"])*1e6,
+                                )
+                    preds.append(pred)
+                
+                ind_pp, ind_p, _ = matcher.match(preds[0], preds[1])
+                # general motion prediction
+                avg_offset = (np.mean(preds[1].center, axis=0) - np.mean(preds[0].center, axis=0)) * p_delta/pp_delta
+                offset = np.ones((preds[1].num_boxes, 2))
+                offset[:, 0] *= avg_offset[0]
+                offset[:, 1] *= avg_offset[1]
+                # matched object interpolation
+                offset[ind_p] = (preds[1].center[ind_p][:, :2] - preds[0].center[ind_pp][:, :2]) * p_delta/pp_delta
+                # matched object confidence adjustment
+                preds[1].confidence[ind_p] = np.min([preds[1].confidence[ind_p], preds[0].confidence[ind_pp]], axis=0)
+
+                preds[1].move_center(offset)
+                temporal_pred = preds[1]     
+        return temporal_pred
+

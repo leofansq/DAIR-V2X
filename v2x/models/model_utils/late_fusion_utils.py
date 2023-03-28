@@ -346,7 +346,7 @@ class BasicFuser(object):
         return result_dict
 
 class CONSULT(object):
-    def __init__(self, perspective, modal_type):
+    def __init__(self, perspective):
         """
         CONfidence-based reSULT-aggregation
         
@@ -354,9 +354,76 @@ class CONSULT(object):
         modal_type: "lidar" or "camera"
         """
         self.perspective = perspective
-        self.modal_type = modal_type
+    
+    def fuse(self, frame_1, frame_2, ind_1, ind_2, model_confidence=1.0, fusion_type='spatial', temporal_type='max', temporal_th=0.5, temporal_decay=0.5):
 
-    def fuse(self, frame_r, frame_v, ind_r, ind_v):
+        if fusion_type == 'spatial':
+            result_dict = self.spatial_fuse(frame_1, frame_2, ind_1, ind_2, model_confidence)
+        elif fusion_type == 'temporal':
+            result_dict = self.temporal_fuse(frame_1, frame_2, ind_1, ind_2, type=temporal_type, th=temporal_th, decay=temporal_decay)
+
+        return result_dict
+    
+    def pred_conf_align(self, pred_conf, model_conf):
+        return pred_conf*model_conf
+    
+    def gen_obs_conf(self, conf_1, conf_2, dist_1, dist_2):
+        obs_confidence1 = conf_1/dist_1
+        obs_confidence2 = conf_2/dist_2
+        obs_confidence = np.sum([obs_confidence1, obs_confidence2], axis=0) + 1e-6
+        obs_confidence1 = obs_confidence1/obs_confidence
+        obs_confidence2 = obs_confidence2/obs_confidence
+
+        return obs_confidence1, obs_confidence2
+
+
+    def score_fusion(self, pred_conf_1, pred_conf_2, fusion_type='bayes'):
+
+        if fusion_type == 'bayes':
+            confidence_mean = (pred_conf_1+pred_conf_2)/2
+            # confidence = self.bayesian_fusion(np.array([pred_conf_1, confidence_mean]))
+            confidence = np.max([self.bayesian_fusion(np.array([pred_conf_1, confidence_mean])), pred_conf_1], axis=0)
+        elif fusion_type == 'max':
+            confidence = np.max([pred_conf_1, pred_conf_2], axis=0)
+        elif fusion_type == 'mean':
+            confidence = np.mean([pred_conf_1, pred_conf_2], axis=0)
+        elif fusion_type == 'mean-max':
+            confidence = np.max([np.mean([pred_conf_1, pred_conf_2], axis=0), pred_conf_1], axis=0)
+        elif fusion_type == 'main':
+            confidence = pred_conf_1
+
+        return confidence
+    
+    def attr_fusion(self, conf_1, conf_2, attr_1, attr_2):
+        return np.where(conf_1>conf_2, attr_1, attr_2)
+    
+    def boxes_fusion(self, center_1, center_2, boxes_1, boxes_2, obs_confidence1, obs_confidence2):
+        center = center_1 * np.repeat(obs_confidence1[:, np.newaxis], 3, axis=1) + center_2 * np.repeat(obs_confidence2[:, np.newaxis], 3, axis=1)
+        # center[:, 2] = frame1.center[ind1][:, 2]
+        # label = np.where(frame1.confidence[ind1]>frame2.confidence[ind2], frame1.label[ind1], frame2.label[ind2])
+        # base_confidence1 = np.repeat(frame1.confidence[ind1][:, np.newaxis], 3, axis=1)
+        # base_confidence2 = np.repeat(frame2.confidence[ind2][:, np.newaxis], 3, axis=1)
+
+        base_confidence1 = np.repeat(obs_confidence1[:, np.newaxis], 3, axis=1)
+        base_confidence2 = np.repeat(obs_confidence2[:, np.newaxis], 3, axis=1)
+        base_center = np.where(base_confidence1>base_confidence2, center_1, center_2)
+        base_confidence1 = np.repeat(base_confidence1[:, np.newaxis, :], 8, axis=1)
+        base_confidence2 = np.repeat(base_confidence2[:, np.newaxis, :], 8, axis=1)
+        base_boxes = np.where(base_confidence1>base_confidence2, boxes_1, boxes_2)
+
+        # center = frame1.center[ind1]
+        # label = frame1.label[ind1]
+        # base_center = frame1.center[ind1]
+        # base_boxes = frame1.boxes[ind1]
+        boxes = (
+            base_boxes
+            + np.repeat(center[:, np.newaxis, :], 8, axis=1)
+            - np.repeat(base_center[:, np.newaxis, :], 8, axis=1)
+        )
+        return boxes
+
+
+    def spatial_fuse(self, frame_r, frame_v, ind_r, ind_v, model_confidence=1.0):
         if self.perspective == "infrastructure":
             frame1 = frame_r
             frame2 = frame_v
@@ -368,44 +435,15 @@ class CONSULT(object):
             ind1 = ind_v
             ind2 = ind_r
 
-        # Score-fusion: bayesian-fusion
-        if self.modal_type == 'lidar':
-            model_confidence = min(17.58 / 48.06, 1.0)
-        elif self.modal_type == 'camera':
-            model_confidence = min(14.02/9.03, 1.0)
-        frame2.confidence[ind2] = frame2.confidence[ind2] * model_confidence
+        frame2.confidence[ind2] = self.pred_conf_align(frame2.confidence[ind2], model_confidence)
 
-        confidence_mean = (frame1.confidence[ind1]+frame2.confidence[ind2])/2
-        confidence = self.bayesian_fusion(np.array([frame1.confidence[ind1], confidence_mean]))
+        confidence = self.score_fusion(frame1.confidence[ind1], frame2.confidence[ind2])
 
-        obs_confidence1 = frame1.confidence[ind1]/frame1.dist[ind1]
-        obs_confidence2 = frame2.confidence[ind2]/frame2.dist[ind2]
-        obs_confidence = np.sum([obs_confidence1, obs_confidence2], axis=0) + 1e-6
-        obs_confidence1 = obs_confidence1/obs_confidence
-        obs_confidence2 = obs_confidence2/obs_confidence
+        obs_confidence1, obs_confidence2 = self.gen_obs_conf(frame1.confidence[ind1], frame2.confidence[ind2], frame1.dist[ind1], frame2.dist[ind2])
 
-        center = frame1.center[ind1] * np.repeat(obs_confidence1[:, np.newaxis], 3, axis=1) + frame2.center[ind2] * np.repeat(obs_confidence2[:, np.newaxis], 3, axis=1)
-        # center[:, 2] = frame1.center[ind1][:, 2]
-        # label = np.where(frame1.confidence[ind1]>frame2.confidence[ind2], frame1.label[ind1], frame2.label[ind2])
-        # base_confidence1 = np.repeat(frame1.confidence[ind1][:, np.newaxis], 3, axis=1)
-        # base_confidence2 = np.repeat(frame2.confidence[ind2][:, np.newaxis], 3, axis=1)
-        label = np.where(obs_confidence1>obs_confidence2, frame1.label[ind1], frame2.label[ind2])
-        base_confidence1 = np.repeat(obs_confidence1[:, np.newaxis], 3, axis=1)
-        base_confidence2 = np.repeat(obs_confidence2[:, np.newaxis], 3, axis=1)
-        base_center = np.where(base_confidence1>base_confidence2, frame1.center[ind1], frame2.center[ind2])
-        base_confidence1 = np.repeat(base_confidence1[:, np.newaxis, :], 8, axis=1)
-        base_confidence2 = np.repeat(base_confidence2[:, np.newaxis, :], 8, axis=1)
-        base_boxes = np.where(base_confidence1>base_confidence2, frame1.boxes[ind1], frame2.boxes[ind2])
+        label = self.attr_fusion(obs_confidence1, obs_confidence2, frame1.label[ind1], frame2.label[ind2])
 
-        # center = frame1.center[ind1]
-        # label = frame1.label[ind1]
-        # base_center = frame1.center[ind1]
-        # base_boxes = frame1.boxes[ind1]
-        boxes = (
-            base_boxes
-            + np.repeat(center[:, np.newaxis, :], 8, axis=1)
-            - np.repeat(base_center[:, np.newaxis, :], 8, axis=1)
-        )
+        boxes = self.boxes_fusion(frame1.center[ind1], frame2.center[ind2], frame1.boxes[ind1], frame2.boxes[ind2], obs_confidence1, obs_confidence2)
 
         boxes_u = []
         label_u = []
@@ -439,6 +477,53 @@ class CONSULT(object):
                 # "arrows": np.concatenate((arrows, np.array(arrows_u)), axis=0),
                 "labels_3d": np.concatenate((label, np.array(label_u)), axis=0),
                 "scores_3d": np.concatenate((confidence, np.array(confidence_u)), axis=0),
+            }
+        return result_dict
+    
+    def temporal_fuse(self, frame_cur, frame_prev,  ind_cur, ind_prev, type='max', th=0.5, decay=0.5):
+
+        confidence = self.score_fusion(frame_cur.confidence[ind_cur], frame_prev.confidence[ind_prev], fusion_type=type)
+        label = frame_cur.label[ind_cur]
+        boxes = frame_cur.boxes[ind_cur]
+        dist = frame_cur.dist[ind_cur]
+
+        boxes_u = []
+        label_u = []
+        confidence_u = []
+        dist_u = []
+        # arrows_u = []
+
+        for i in range(frame_cur.num_boxes):
+            if i not in ind_cur and frame_cur.label[i] != -1:
+                boxes_u.append(frame_cur.boxes[i])
+                label_u.append(frame_cur.label[i])
+                confidence_u.append(frame_cur.confidence[i])
+                dist_u.append(frame_cur.dist[i])
+                # arrows_u.append(frame1.arrows[i])
+
+        for i in range(frame_prev.num_boxes):
+            if i not in ind_prev and frame_prev.label[i] != -1 and frame_prev.confidence[i]>=th:
+                    boxes_u.append(frame_prev.boxes[i])
+                    label_u.append(frame_prev.label[i])
+                    confidence_u.append(frame_prev.confidence[i]*decay) # cam 0.7
+                    dist_u.append(frame_prev.dist[i])
+                # arrows_u.append(frame2.arrows[i])
+
+        if len(boxes_u) == 0:
+            result_dict = {
+                "boxes_3d": boxes,
+                # "arrows": arrows,
+                "labels_3d": label,
+                "scores_3d": confidence,
+                "dists_3d": dist
+            }
+        else:
+            result_dict = {
+                "boxes_3d": np.concatenate((boxes, np.array(boxes_u)), axis=0),
+                # "arrows": np.concatenate((arrows, np.array(arrows_u)), axis=0),
+                "labels_3d": np.concatenate((label, np.array(label_u)), axis=0),
+                "scores_3d": np.concatenate((confidence, np.array(confidence_u)), axis=0),
+                "dists_3d": np.concatenate((dist, np.array(dist_u)), axis=0),
             }
         return result_dict
     

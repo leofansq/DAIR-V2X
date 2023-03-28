@@ -1,10 +1,11 @@
 import os.path as osp
 from functools import cmp_to_key
 import logging
+import pdb
 
 logger = logging.getLogger(__name__)
 
-from base_dataset import DAIRV2XDataset, get_annos, build_path_to_info
+from base_dataset import DAIRV2XDataset, get_annos, build_path_to_info, build_veh_to_pair
 from dataset.dataset_utils import load_json, InfFrame, VehFrame, VICFrame, Label
 from v2x_utils import Filter, RectFilter, id_cmp, id_to_str, get_trans, box_translation
 
@@ -177,6 +178,8 @@ class VICDataset(DAIRV2XDataset):
                 filt,
             )
             self.data.append(tup)
+        
+        self.veh2pair = build_veh_to_pair(frame_pairs, sensortype)
 
     def query_veh_segment(self, frame, sensortype="lidar", previous_only=False):
         segment = self.veh_frames[frame.batch_id]
@@ -269,6 +272,71 @@ class VICAsyncDataset(VICDataset):
                 InfFrame(self.path + "/infrastructure-side/", prev),
                 (int(cur["image_timestamp"]) - int(prev["image_timestamp"])) / 1000.0,
             )
+    
+    def prev_vic_frame(self, id_veh, sensortype="lidar", specified_k=None):
+        if specified_k is not None:
+            self.k = specified_k
+        
+        prev_vic = {'frame_vic':None, 'delta_t':None}
+        if sensortype == "lidar":
+
+            cur_veh = self.veh_path2info["vehicle-side/velodyne/" + id_veh + ".pcd"]
+            if not (
+                int(id_veh) - self.k < int(cur_veh["batch_start_id"])
+                or "vehicle-side/velodyne/" + id_to_str(int(id_veh) - self.k) + ".pcd" not in self.veh_path2info
+            ):
+                prev_veh = self.veh_path2info["vehicle-side/velodyne/" + id_to_str(int(id_veh) - self.k) + ".pcd"]
+
+                if 'vehicle-side/'+prev_veh['pointcloud_path'] in self.veh2pair:
+                    prev_pair = self.veh2pair['vehicle-side/'+prev_veh['pointcloud_path']]
+
+                    inf_frame = self.inf_path2info[prev_pair["infrastructure_pointcloud_path"]]
+                    veh_frame = self.veh_path2info[prev_pair["vehicle_pointcloud_path"]]
+
+                    inf_frame = InfFrame(self.path + "/infrastructure-side/", inf_frame)
+                    veh_frame = VehFrame(self.path + "/vehicle-side/", veh_frame)
+                    if not inf_frame["batch_id"] in self.inf_frames:
+                        self.inf_frames[inf_frame["batch_id"]] = [inf_frame]
+                    else:
+                        self.inf_frames[inf_frame["batch_id"]].append(inf_frame)
+                    if not veh_frame["batch_id"] in self.veh_frames:
+                        self.veh_frames[veh_frame["batch_id"]] = [veh_frame]
+                    else:
+                        self.veh_frames[veh_frame["batch_id"]].append(veh_frame)
+                    
+                    prev_vic["frame_vic"] = VICFrame(self.path, prev_pair, veh_frame, inf_frame, 0)
+                    prev_vic["delta_t"] = (int(cur_veh["pointcloud_timestamp"]) - int(prev_veh["pointcloud_timestamp"])) / 1000.0
+
+        elif sensortype == "camera":
+
+            cur_veh = self.veh_path2info["vehicle-side/image/" + id_veh + ".jpg"]
+            if not (
+                int(id_veh) - self.k < int(cur_veh["batch_start_id"])
+                or "vehicle-side/image/" + id_to_str(int(id_veh) - self.k) + ".jpg" not in self.veh_path2info
+            ):
+                prev_veh = self.veh_path2info["vehicle-side/image/" + id_to_str(int(id_veh) - self.k) + ".jpg"]
+
+                if 'vehicle-side/'+prev_veh['image_path'] in self.veh2pair:
+                    prev_pair = self.veh2pair['vehicle-side/'+prev_veh['image_path']]
+
+                    inf_frame = self.inf_path2info[prev_pair["infrastructure_image_path"]]
+                    veh_frame = self.veh_path2info[prev_pair["vehicle_image_path"]]
+
+                    inf_frame = InfFrame(self.path + "/infrastructure-side/", inf_frame)
+                    veh_frame = VehFrame(self.path + "/vehicle-side/", veh_frame)
+                    if not inf_frame["batch_id"] in self.inf_frames:
+                        self.inf_frames[inf_frame["batch_id"]] = [inf_frame]
+                    else:
+                        self.inf_frames[inf_frame["batch_id"]].append(inf_frame)
+                    if not veh_frame["batch_id"] in self.veh_frames:
+                        self.veh_frames[veh_frame["batch_id"]] = [veh_frame]
+                    else:
+                        self.veh_frames[veh_frame["batch_id"]].append(veh_frame)
+                    
+                    prev_vic["frame_vic"] = VICFrame(self.path, prev_pair, veh_frame, inf_frame, 0)
+                    prev_vic["delta_t"] = (int(cur_veh["image_timestamp"]) - int(prev_veh["image_timestamp"])) / 1000.0
+        
+        return prev_vic
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ class Channel(object):
         self.all_bytes = 0
         self.num_frames = 0
 
-    def send(self, key, val):
+    def send(self, key, val, is_count_byte=True):
         self.data[key] = val
         if isinstance(val, np.ndarray):
             cur_bytes = val.size * 8
@@ -21,7 +21,9 @@ class Channel(object):
             cur_bytes = len(val)
         if key.endswith("boxes"):
             cur_bytes = cur_bytes * 7 / 24
-        self.cur_bytes += cur_bytes
+        
+        if is_count_byte:
+            self.cur_bytes += cur_bytes
 
     def flush(self):
         self.data = {}

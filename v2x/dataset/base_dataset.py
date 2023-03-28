@@ -63,6 +63,20 @@ def build_path_to_info(prefix, data, sensortype="lidar"):
             path2info[path] = elem
     return path2info
 
+def build_veh_to_pair(data, sensortype="lidar"):
+    veh2pair = {}
+    if sensortype == "lidar":
+        for elem in data:
+            if elem["vehicle_pointcloud_path"] == "":
+                continue
+            veh2pair[elem["vehicle_pointcloud_path"]] = elem
+    elif sensortype == "camera":
+        for elem in data:
+            if elem["vehicle_image_path"] == "":
+                continue
+            veh2pair[elem["vehicle_image_path"]] = elem
+    return veh2pair
+
 
 class DAIRV2XDataset(Dataset):
     def __init__(self, path, args, split="train", extended_range=None):
